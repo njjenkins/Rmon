@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# rmon: run Rscript with a live CPU/RAM status bar pinned to the bottom
+# of the terminal. No tmux required.
+#
+# Usage:
+#   rmon myscript.R [args...]
+#
+# Two design notes worth knowing if you ever modify this:
+#
+# 1. SOLE WRITER. Rscript runs under a pty (via `script`) and its output is
+#    piped back here; this loop prints the content AND paints the status
+#    bar. Nothing else touches the TTY, so save-cursor/restore-cursor can't
+#    race with R's own writes. Letting both write concurrently corrupts
+#    lines (text lands mid-line where the cursor was snapped back to).
+#
+# 2. EXPLICIT CRLF. `script` puts the OUTER terminal into raw mode, which
+#    disables ONLCR (the NL -> CR-NL output translation). So a bare "\n"
+#    drops a row without returning to column 0, producing staircased
+#    output. Every line we emit therefore ends in an explicit "\r\n".
+
+set -uo pipefail
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: rmon script.R [args...]" >&2
+  exit 1
+fi
+
+if [ ! -t 1 ]; then
+  # No TTY (batch job, output redirected) — status bar is meaningless.
+  exec Rscript "$@"
+fi
+
+# ------------------------------------------------------------- tty handling
+SAVED_STTY=$(stty -g 2>/dev/null || true)
+
+TERM_ROWS=0
+REGION_BOTTOM=0
+STATUS_ROW=0
+
+setup_region() {
+  TERM_ROWS=$(tput lines)
+  REGION_BOTTOM=$((TERM_ROWS - 2))   # 0-indexed last scrolling row
+  STATUS_ROW=$((TERM_ROWS - 1))      # 0-indexed reserved bottom row
+  tput csr 0 "$REGION_BOTTOM"        # confine scrolling to rows 0..N-2
+  tput cup "$REGION_BOTTOM" 0
+}
+
+restore_terminal() {
+  tput csr 0 $(( $(tput lines) - 1 ))
+  tput cup $(( $(tput lines) - 1 )) 0
+  tput el
+  tput cnorm
+  [ -n "$SAVED_STTY" ] && stty "$SAVED_STTY" 2>/dev/null
+  printf '\r\n'
+}
+
+handle_resize() { setup_region; }
+trap handle_resize WINCH
+trap 'restore_terminal; exit 130' INT TERM
+
+# ------------------------------------------------------------- process tree
+descendants() {
+  local parent=$1 kid
+  for kid in $(pgrep -P "$parent" 2>/dev/null); do
+    echo "$kid"
+    descendants "$kid"
+  done
+}
+
+# Prefer PSS (proportional set size): shared pages are divided among the
+# processes mapping them, so forked workers sharing copy-on-write pages with
+# the parent are counted once in aggregate rather than once per worker.
+# Falls back to summed RSS on kernels without smaps_rollup (< 4.14, e.g.
+# RHEL 7), where the number is an upper bound on true footprint.
+HAVE_PSS=0
+[ -r /proc/self/smaps_rollup ] && HAVE_PSS=1
+MEM_LABEL="RAM"
+[ "$HAVE_PSS" -eq 0 ] && MEM_LABEL="RAM~"
+
+# ------------------------------------------------------------------- launch
+CMD=$(printf '%q ' Rscript "$@")
+
+setup_region
+
+# -q quiet, -f flush after each write, -e return the child's exit status
+exec 3< <(script -qfec "$CMD" /dev/null 2>&1)
+SCRIPT_PID=$!
+
+START=$SECONDS
+
+paint_status() {
+  local pidlist p csv stats total_cpu total_kb mem_gb elapsed width bar
+
+  pidlist=$(descendants "$SCRIPT_PID")
+
+  total_cpu="0.0"
+  total_kb=0
+
+  if [ -n "$pidlist" ]; then
+    csv=$(tr '\n' ',' <<< "$pidlist" | sed 's/,$//')
+    stats=$(ps -o %cpu= -p "$csv" 2>/dev/null)
+    [ -n "$stats" ] && total_cpu=$(awk '{c+=$1} END{printf "%.1f", c}' <<< "$stats")
+
+    if [ "$HAVE_PSS" -eq 1 ]; then
+      for p in $pidlist; do
+        total_kb=$(( total_kb + $(awk '/^Pss:/{print $2; exit}' \
+          "/proc/$p/smaps_rollup" 2>/dev/null || echo 0) ))
+      done
+    else
+      stats=$(ps -o rss= -p "$csv" 2>/dev/null)
+      [ -n "$stats" ] && total_kb=$(awk '{r+=$1} END{print r+0}' <<< "$stats")
+    fi
+  fi
+
+  mem_gb=$(awk -v kb="$total_kb" 'BEGIN{printf "%.2f", kb/1048576}')
+
+  elapsed=$(printf '%02d:%02d:%02d' \
+    $(( (SECONDS-START)/3600 )) $(( ((SECONDS-START)%3600)/60 )) $(( (SECONDS-START)%60 )))
+
+  width=$(tput cols)
+  bar=$(printf ' CPU %7s%%   %s %7s GB   elapsed %s' \
+    "$total_cpu" "$MEM_LABEL" "$mem_gb" "$elapsed")
+
+  tput sc
+  tput cup "$STATUS_ROW" 0
+  tput el
+  tput smso
+  printf '%-*.*s' "$width" "$width" "$bar"
+  tput rmso
+  tput rc
+}
+
+paint_status
+
+while true; do
+  if IFS= read -r -t 1 -u 3 line; then
+    # Explicit CR+LF: the outer tty is in raw mode, so ONLCR is off.
+    printf '%s\r\n' "${line%$'\r'}"
+    paint_status
+  else
+    rc=$?
+    if [ "$rc" -gt 128 ]; then
+      paint_status                 # timeout: R is quiet, just refresh
+    else
+      break                        # EOF: R exited
+    fi
+  fi
+done
+
+exec 3<&-
+wait "$SCRIPT_PID"
+EXIT_CODE=$?
+
+restore_terminal
+exit "$EXIT_CODE"
