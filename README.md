@@ -22,7 +22,7 @@ Rmon puts the numbers in the same terminal as the output, live.
 ## Install
 
 ```bash
-curl -o ~/.local/bin/Rmon https://raw.githubusercontent.com/USER/Rmon/main/Rmon
+curl -o ~/.local/bin/Rmon https://raw.githubusercontent.com/njjenkins/Rmon/main/Rmon
 chmod +x ~/.local/bin/Rmon
 ```
 
