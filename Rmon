@@ -25,6 +25,11 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
+if ! command -v Rscript >/dev/null 2>&1; then
+  echo "rmon: Rscript not found in PATH" >&2
+  exit 127
+fi
+
 if [ ! -t 1 ]; then
   # No TTY (batch job, output redirected) — status bar is meaningless.
   exec Rscript "$@"
@@ -36,6 +41,15 @@ SAVED_STTY=$(stty -g 2>/dev/null || true)
 TERM_ROWS=0
 REGION_BOTTOM=0
 STATUS_ROW=0
+
+START=$SECONDS      # wall-clock reference for the elapsed timer
+PEAK_KB=0           # high-water mark of sampled memory, for the exit recap
+LAST_TICK=-1        # last SECONDS value we repainted on (paint throttle)
+MEM_LABEL="RAM"     # refined to RAM~ below if the kernel lacks PSS
+
+CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)  # jiffies per second
+PREV_JIFFIES=-1     # -1 until the first CPU sample is seeded
+PREV_TIME=0         # SECONDS value at the previous CPU sample
 
 setup_region() {
   TERM_ROWS=$(tput lines)
@@ -54,9 +68,24 @@ restore_terminal() {
   printf '\r\n'
 }
 
+fmt_elapsed() {
+  local s=$(( SECONDS - START ))
+  printf '%02d:%02d:%02d' $(( s/3600 )) $(( (s%3600)/60 )) $(( s%60 ))
+}
+
+# One-line recap after the bar is torn down: how the run ended, how long it
+# took, and the peak memory we sampled — the number you actually want when
+# the question was "did this fit in RAM?".
+print_summary() {
+  local status=$1 peak_gb
+  peak_gb=$(awk -v kb="$PEAK_KB" 'BEGIN{printf "%.2f", kb/1048576}')
+  printf 'Rmon: %s · Elapsed %s · peak %s %s GB\n' \
+    "$status" "$(fmt_elapsed)" "$MEM_LABEL" "$peak_gb"
+}
+
 handle_resize() { setup_region; }
 trap handle_resize WINCH
-trap 'restore_terminal; exit 130' INT TERM
+trap 'restore_terminal; print_summary interrupted; exit 130' INT TERM
 
 # ------------------------------------------------------------- process tree
 descendants() {
@@ -74,7 +103,6 @@ descendants() {
 # RHEL 7), where the number is an upper bound on true footprint.
 HAVE_PSS=0
 [ -r /proc/self/smaps_rollup ] && HAVE_PSS=1
-MEM_LABEL="RAM"
 [ "$HAVE_PSS" -eq 0 ] && MEM_LABEL="RAM~"
 
 # ------------------------------------------------------------------- launch
@@ -86,10 +114,9 @@ setup_region
 exec 3< <(script -qfec "$CMD" /dev/null 2>&1)
 SCRIPT_PID=$!
 
-START=$SECONDS
-
 paint_status() {
-  local pidlist p csv stats total_cpu total_kb mem_gb elapsed width bar
+  local pidlist p st rest total_cpu total_kb mem_gb width bar
+  local jiffies_now=0 delta_j delta_t csv stats
 
   pidlist=$(descendants "$SCRIPT_PID")
 
@@ -97,29 +124,50 @@ paint_status() {
   total_kb=0
 
   if [ -n "$pidlist" ]; then
-    csv=$(tr '\n' ',' <<< "$pidlist" | sed 's/,$//')
-    stats=$(ps -o %cpu= -p "$csv" 2>/dev/null)
-    [ -n "$stats" ] && total_cpu=$(awk '{c+=$1} END{printf "%.1f", c}' <<< "$stats")
+    for p in $pidlist; do
+      # CPU: sum utime+stime (jiffies). The comm field in /proc/<pid>/stat can
+      # hold spaces and parens, so slice past the last ')' before splitting;
+      # after that, utime and stime are fields 12 and 13.
+      { IFS= read -r st < "/proc/$p/stat" && {
+          rest=${st##*)}
+          set -- $rest
+          jiffies_now=$(( jiffies_now + ${12} + ${13} ))
+        }
+      } 2>/dev/null
 
-    if [ "$HAVE_PSS" -eq 1 ]; then
-      for p in $pidlist; do
+      # RAM via PSS, summed in the same walk.
+      if [ "$HAVE_PSS" -eq 1 ]; then
         total_kb=$(( total_kb + $(awk '/^Pss:/{print $2; exit}' \
           "/proc/$p/smaps_rollup" 2>/dev/null || echo 0) ))
-      done
-    else
+      fi
+    done
+
+    if [ "$HAVE_PSS" -eq 0 ]; then
+      csv=$(tr '\n' ',' <<< "$pidlist" | sed 's/,$//')
       stats=$(ps -o rss= -p "$csv" 2>/dev/null)
       [ -n "$stats" ] && total_kb=$(awk '{r+=$1} END{print r+0}' <<< "$stats")
     fi
   fi
 
+  # Live CPU%: change in jiffies over the wall-clock interval since the last
+  # sample, as a percentage of one core. Clamp negatives (the process set can
+  # shrink between samples). Stays "0.0" for the first, un-seeded sample.
+  delta_t=$(( SECONDS - PREV_TIME ))
+  if [ "$PREV_JIFFIES" -ge 0 ] && [ "$delta_t" -gt 0 ]; then
+    delta_j=$(( jiffies_now - PREV_JIFFIES ))
+    total_cpu=$(awk -v dj="$delta_j" -v ck="$CLK_TCK" -v dt="$delta_t" \
+      'BEGIN{ c=(dj/ck)/dt*100; if (c < 0) c=0; printf "%.1f", c }')
+  fi
+  PREV_JIFFIES=$jiffies_now
+  PREV_TIME=$SECONDS
+
+  [ "$total_kb" -gt "$PEAK_KB" ] && PEAK_KB=$total_kb
+
   mem_gb=$(awk -v kb="$total_kb" 'BEGIN{printf "%.2f", kb/1048576}')
 
-  elapsed=$(printf '%02d:%02d:%02d' \
-    $(( (SECONDS-START)/3600 )) $(( ((SECONDS-START)%3600)/60 )) $(( (SECONDS-START)%60 )))
-
   width=$(tput cols)
-  bar=$(printf ' CPU %7s%%   %s %7s GB   elapsed %s' \
-    "$total_cpu" "$MEM_LABEL" "$mem_gb" "$elapsed")
+  bar=$(printf ' CPU %7s%%   %s %7s GB   Elapsed %s' \
+    "$total_cpu" "$MEM_LABEL" "$mem_gb" "$(fmt_elapsed)")
 
   tput sc
   tput cup "$STATUS_ROW" 0
@@ -130,17 +178,25 @@ paint_status() {
   tput rc
 }
 
+maybe_paint() {
+  # Sampling (descendants + ps + smaps) is comparatively expensive; cap it at
+  # once per second so chatty output doesn't fork a monitor for every line.
+  # Output lines themselves are still printed immediately, above the bar.
+  [ "$SECONDS" -ne "$LAST_TICK" ] && { LAST_TICK=$SECONDS; paint_status; }
+}
+
 paint_status
+LAST_TICK=$SECONDS
 
 while true; do
   if IFS= read -r -t 1 -u 3 line; then
     # Explicit CR+LF: the outer tty is in raw mode, so ONLCR is off.
     printf '%s\r\n' "${line%$'\r'}"
-    paint_status
+    maybe_paint
   else
     rc=$?
     if [ "$rc" -gt 128 ]; then
-      paint_status                 # timeout: R is quiet, just refresh
+      maybe_paint                  # timeout: R is quiet, just refresh
     else
       break                        # EOF: R exited
     fi
@@ -152,4 +208,5 @@ wait "$SCRIPT_PID"
 EXIT_CODE=$?
 
 restore_terminal
+print_summary "exit $EXIT_CODE"
 exit "$EXIT_CODE"

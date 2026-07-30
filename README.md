@@ -10,7 +10,13 @@ The following objects are masked from ‘package:data.table’:
 Building Regression Panel...
 Loading Master Panel: data/cleaned/analysis_panel_2026_07_03.parquet
 Merging transaction history...
- CPU   554.1%   RAM   48.72 GB   elapsed 00:12:47
+ CPU   554.1%   RAM   48.72 GB   Elapsed 00:12:47
+```
+
+When the script exits, Rmon prints a one-line recap:
+
+```
+Rmon: exit 0 · Elapsed 00:12:47 · peak RAM 51.03 GB
 ```
 
 ## Why
@@ -45,9 +51,9 @@ If stdout isn't a terminal — a batch job, or `Rmon script.R > log.txt` — Rmo
 
 | Field | Meaning |
 |---|---|
-| `CPU` | Summed `%cpu` across the R process and all descendants. **Relative to one core**, so 400% means four cores' worth. |
+| `CPU` | CPU use over the last sampling interval (~1s), summed across the R process and all descendants. **Relative to one core**, so 400% means four cores' worth. |
 | `RAM` | Summed PSS across the process tree — see below. |
-| `elapsed` | Wall clock since launch. |
+| `Elapsed` | Wall clock since launch. |
 
 If the label reads `RAM~` rather than `RAM`, the kernel is too old for PSS and the figure is a summed-RSS upper bound.
 
@@ -79,8 +85,8 @@ The terminal state is saved with `stty -g` at startup and restored on exit, and 
 
 ## Limitations
 
-- The CPU figure is summed across processes and relative to a single core. Compare it against the cores you actually requested — if you asked for 4 and see 550%, something (`data.table::setDTthreads()`, an OpenMP BLAS) is oversubscribing, which slows you down on a shared scheduler.
-- PSS is sampled once a second, so a short allocation spike between samples can be missed. For a hard peak figure, use `/usr/bin/time -v`.
+- The CPU figure is summed across processes and relative to a single core. Compare it against the cores you actually requested — if you asked for 4 and see 550%, something (`data.table::setDTthreads()`, an OpenMP BLAS) is oversubscribing, which slows you down on a shared scheduler. It's an interval sample (`utime`+`stime` deltas from `/proc/<pid>/stat`), so a worker that starts mid-interval can briefly inflate the reading before it settles.
+- PSS is sampled once a second, so a short allocation spike between samples can be missed. The peak in the exit recap is the high-water mark of those samples and inherits the same blind spot; for a hard peak figure, use `/usr/bin/time -v`.
 - If your R code does its own cursor positioning near the bottom of the screen, it can collide with the status bar. A tmux split pane is immune to this; Rmon is not.
 
 ## Prior art
