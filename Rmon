@@ -21,12 +21,12 @@
 set -uo pipefail
 
 if [ "$#" -eq 0 ]; then
-  echo "usage: rmon script.R [args...]" >&2
+  echo "Usage: Rmon script.R [args...]" >&2
   exit 1
 fi
 
 if ! command -v Rscript >/dev/null 2>&1; then
-  echo "rmon: Rscript not found in PATH" >&2
+  echo "Rmon: Rscript not found in PATH" >&2
   exit 127
 fi
 
@@ -79,7 +79,7 @@ fmt_elapsed() {
 print_summary() {
   local status=$1 peak_gb
   peak_gb=$(awk -v kb="$PEAK_KB" 'BEGIN{printf "%.2f", kb/1048576}')
-  printf 'Rmon: %s · Elapsed %s · peak %s %s GB\n' \
+  printf 'Rmon: %s · Elapsed %s · Peak %s %s GB\n' \
     "$status" "$(fmt_elapsed)" "$MEM_LABEL" "$peak_gb"
 }
 
@@ -208,5 +208,5 @@ wait "$SCRIPT_PID"
 EXIT_CODE=$?
 
 restore_terminal
-print_summary "exit $EXIT_CODE"
+print_summary "Exit $EXIT_CODE"
 exit "$EXIT_CODE"
