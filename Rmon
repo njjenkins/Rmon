@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# rmon: run Rscript with a live CPU/RAM status bar pinned to the bottom
+# Rmon: run Rscript with a live CPU/RAM status bar pinned to the bottom
 # of the terminal. No tmux required.
 #
 # Usage:
-#   rmon myscript.R [args...]
+#   Rmon myscript.R [args...]
 #
 # Two design notes worth knowing if you ever modify this:
 #
@@ -33,6 +33,14 @@ fi
 if [ ! -t 1 ]; then
   # No TTY (batch job, output redirected) — status bar is meaningless.
   exec Rscript "$@"
+fi
+
+# Only needed for the status-bar path above; checked after the TTY test so a
+# redirected run still works on a box without it. Some distros ship `script`
+# in a separate package (Fedora/RHEL: util-linux-script).
+if ! command -v script >/dev/null 2>&1; then
+  echo "Rmon: script(1) not found in PATH (install util-linux-script)" >&2
+  exit 127
 fi
 
 # ------------------------------------------------------------- tty handling
@@ -85,7 +93,7 @@ print_summary() {
 
 handle_resize() { setup_region; }
 trap handle_resize WINCH
-trap 'restore_terminal; print_summary interrupted; exit 130' INT TERM
+trap 'restore_terminal; print_summary Interrupted; exit 130' INT TERM
 
 # ------------------------------------------------------------- process tree
 descendants() {

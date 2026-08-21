@@ -16,7 +16,7 @@ Merging transaction history...
 When the script exits, Rmon prints a one-line recap:
 
 ```
-Rmon: exit 0 · Elapsed 00:12:47 · peak RAM 51.03 GB
+Rmon: Exit 0 · Elapsed 00:12:47 · Peak RAM 51.03 GB
 ```
 
 ## Why
@@ -32,7 +32,10 @@ curl -o ~/.local/bin/Rmon https://raw.githubusercontent.com/njjenkins/Rmon/main/
 chmod +x ~/.local/bin/Rmon
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. No dependencies beyond bash, coreutils, and `util-linux`.
+Make sure `~/.local/bin` is on your `PATH`. No dependencies beyond bash, coreutils, `awk`,
+`ncurses` (`tput`), `procps-ng` (`ps`, `pgrep`), and `util-linux` (`script`). On Fedora and
+RHEL 9+, `script` lives in a separate `util-linux-script` package; Rmon checks for it at
+startup and tells you if it's missing.
 
 ## Usage
 
@@ -78,9 +81,14 @@ The terminal state is saved with `stty -g` at startup and restored on exit, and 
 ## Requirements
 
 - **Linux.** Uses `/proc` and Linux `ps`; will not work on macOS or BSD.
-- **bash 4+** — the script uses bash-only syntax and will misbehave under `dash` or `sh`.
-- **`util-linux` ≥ 2.22** for `script -f -e`.
-- **Kernel ≥ 4.14** for PSS via `smaps_rollup`. Older kernels (RHEL 7) fall back to summed RSS, labeled `RAM~`.
+- **bash 4.4+** — the script uses bash-only syntax and will misbehave under `dash` or `sh`.
+  4.4 specifically: Rmon reads the child's exit status with `wait` on a process substitution,
+  which older bash rejects (`pid N is not a child of this shell`), so on 4.2/4.3 every run
+  would report exit 127.
+- **`util-linux` ≥ 2.22** for `script -qfec`, in particular `-e` (propagate the child's exit status).
+- **Kernel ≥ 4.14** for PSS via `smaps_rollup`. Older kernels fall back to summed RSS, labeled
+  `RAM~`. Note that RHEL 7 is the usual such kernel (3.10) and its stock bash is 4.2, below the
+  requirement above — it needs a newer bash before the fallback is reachable.
 - A VT100-capable terminal, which in practice means any of them.
 
 ## Limitations
